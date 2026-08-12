@@ -1,0 +1,4 @@
+[
+	{"caption": "Sublime Config", "command": "st_config_open"},
+	{"caption": "Sublime Settings Editor", "command": "settings_editor_open"}
+]
