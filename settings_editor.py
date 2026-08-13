@@ -8,9 +8,13 @@ Default -> Platform -> Distraction Free -> User with the winner marked) and
 every consequence (which keybindings/menus/plugin code read it, what breaks if
 it changes). The editable Value row hosts a typed cell editor; a Write-to
 dropdown picks the destination settings file (default = current source); a
-Restore Default action reverts; the description/help area sits at the bottom
-(Eclipse convention); and edit-time consequence warnings surface inline and in
-a confirm dialog before the write. A Stop button kills the server.
+Restore Default action reverts; the description/help area sits right under
+Type/Default (moved up from the Eclipse-convention bottom placement: it's
+often the only place a setting's valid-values vocabulary is documented, e.g.
+font_options' "no_bold"/"gray_antialias"/... list, and burying it below seven
+other panels meant it went unnoticed); and edit-time consequence warnings
+surface inline and in a confirm dialog before the write. A Stop button kills
+the server.
 
 Architecture (see config/EDITOR_DESIGN.md):
 - In-ST Python HTTP server + browser UI (port 57323).
@@ -1303,9 +1307,14 @@ table.props .row-edit td{background:#fafbff}
 .warns{margin:8px 0 0;padding:8px 10px;background:var(--warn-bg);border:1px solid #f0c9a0;border-radius:6px;font-size:12.5px;color:var(--warn)}
 .warns.ok{background:#f0fdf4;border-color:#bbf7d0;color:#15803d}
 .warns ul{margin:4px 0 0;padding-left:16px}
-.desc-area{margin-top:14px;padding:12px 16px;background:#fff;border:1px solid var(--line);border-radius:6px}
+.desc-area{margin:14px 0;padding:12px 16px;background:#fff;border:1px solid var(--line);border-radius:6px}
 .desc-area .h{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;font-weight:600;margin:0 0 6px}
 .desc-area .body{font-size:13px;color:#222;line-height:1.55}
+.desc-area .body p{margin:0 0 8px}
+.desc-area .body p:last-child{margin-bottom:0}
+.desc-area .body ul{margin:0;padding-left:18px}
+.desc-area .body li{margin:4px 0}
+.desc-area .body li code{background:var(--warn-bg,#f5f5f0);padding:1px 4px;border-radius:3px;font-size:12px}
 .modal-bg{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;z-index:20}
 .modal-bg.show{display:flex}
 .modal{background:#fff;border-radius:8px;padding:14px 16px;width:540px;max-width:92vw;box-shadow:0 10px 40px rgba(0,0,0,.25)}
@@ -1420,6 +1429,24 @@ function valueFromEditor(){
   }
 }
 
+function descHTML(text){
+  if(!text) return '(no description available)';
+  // Default/Preferences.sublime-settings comments often document a setting's
+  // valid-values vocabulary as a run-on " - \"name\": explanation" sequence
+  // (see font_options) -- one giant paragraph hides that from a scan. Break
+  // before each such bullet marker; render as a list if more than one was
+  // found, otherwise fall back to a plain paragraph so normal prose isn't
+  // mangled.
+  const bullet=/ - (?=["'][^"']+["']\s*:)/g;
+  const parts=text.split(bullet);
+  if(parts.length<2) return '<p>'+esc(text)+'</p>';
+  const lead=parts[0].trim();
+  const items=parts.slice(1).map(p=>{
+    const m=p.trim().match(/^(["'][^"']+["'])\s*:\s*([\s\S]*)$/);
+    return m?'<li><code>'+esc(m[1])+'</code>: '+esc(m[2])+'</li>':'<li>'+esc(p.trim())+'</li>';
+  }).join('');
+  return (lead?'<p>'+esc(lead)+'</p>':'')+'<ul>'+items+'</ul>';
+}
 function chainHTML(){
   const ch=D.override_chain||[];
   if(!ch.length) return '<span class="none">no global layers define it</span>';
@@ -1448,6 +1475,9 @@ function renderSheet(){
    '<table class="props">'+
     row('Category',esc(D.category))+
     row('Type',esc(D.type)+(D.enum?(' <span class="file">(allowed: '+esc(D.enum.join(', '))+')</span>'):''))+
+   '</table>'+
+   '<div class="desc-area"><p class="h">Description / help</p><div class="body">'+descHTML(D.desc)+'</div></div>'+
+   '<table class="props">'+
     row('Default',esc(fmt(D.default)))+
     row('Effective',esc(fmt(eff))+' <span class="file">(from active view)</span>')+
     row('Owner',esc(D.owner))+
@@ -1465,8 +1495,7 @@ function renderSheet(){
     '<tr><td class="k"></td><td class="v"><ul class="reads">'+readsHTML('menu',D.usage.menus,'menu')+'</ul></td></tr>'+
     sec('Reads — plugin code (loose Packages only)')+
     '<tr><td class="k"></td><td class="v"><ul class="reads">'+readsHTML('py',D.usage.plugins,'py')+'</ul></td></tr>'+
-   '</table>'+
-   '<div class="desc-area"><p class="h">Description / help</p><div class="body">'+esc(D.desc||'(no description available)')+'</div></div>';
+   '</table>';
   bindSheet();
   refreshWarns(valueFromEditor());
 }
