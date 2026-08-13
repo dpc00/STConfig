@@ -1326,6 +1326,14 @@ table.props .row-edit td{background:#fafbff}
 .modal button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
 .modal button.danger{background:var(--danger);color:#fff;border-color:var(--danger)}
 .confirm-list{margin:6px 0;padding-left:18px;color:var(--warn)}
+.modlist{max-height:320px;overflow-y:auto;padding-right:2px}
+.modrow{display:flex;gap:6px;margin-bottom:6px}
+.modrow input{flex:1;font:12.5px "Cascadia Code",Consolas,monospace;padding:6px 8px;border:1px solid var(--line);border-radius:6px}
+.modrow .rmrow{padding:4px 9px;border:1px solid var(--line);background:#fff;border-radius:6px;cursor:pointer;color:var(--danger);flex:none}
+.modrow .rmrow:hover{background:var(--danger);color:#fff;border-color:var(--danger)}
+#modaddrow{width:100%;margin-top:2px}
+.modtoggle{justify-content:flex-start!important;margin-top:8px!important}
+.modtoggle a{font-size:12px;color:var(--muted)}
 </style></head>
 <body>
 <div class="topbar">
@@ -1345,7 +1353,9 @@ table.props .row-edit td{background:#fafbff}
 </div>
 <div class="modal-bg" id="modalbg"><div class="modal">
  <h3 id="modtitle">Edit value</h3>
+ <div id="modlist" class="modlist"></div>
  <textarea id="modta"></textarea>
+ <div class="row modtoggle"><a href="#" id="modtoggle">Switch to raw JSON</a></div>
  <div class="err" id="moderr"></div>
  <div class="row"><button id="modcancel">Cancel</button><button id="modsave" class="primary">Save</button></div>
 </div></div>
@@ -1566,20 +1576,80 @@ function reloadCatalog(){fetch(catalogUrl()).then(r=>r.json()).then(c=>{S=c.sett
 function reloadCatalogThenSelect(){fetch(catalogUrl()).then(r=>r.json()).then(c=>{S=c.settings||[];CAT=c.categories||[];renderTree();select(D.name);});}
 
 let modName=null;
+// Array-of-primitives settings (glob patterns, package names, font_options
+// values, ...) are the common case for the "array" type, and hand-editing
+// raw JSON for those -- correct quoting, commas, brackets -- is exactly the
+// kind of thing that's fine for a developer and rough for anyone else. Row
+// editor is the default for that shape; anything else (objects, arrays
+// containing arrays/objects) falls back to the raw textarea, reachable from
+// either mode via the toggle link.
+let modListMode=false, modItems=[];
+function isSimpleArray(v){
+  return Array.isArray(v) && v.every(x=>typeof x==='string'||typeof x==='number'||typeof x==='boolean');
+}
+function renderModList(){
+  $('modlist').innerHTML=modItems.map((v,i)=>
+    '<div class="modrow"><input class="ed-cell" data-i="'+i+'" value="'+esc(v)+'"><button class="rmrow" data-i="'+i+'" title="Remove">✕</button></div>'
+  ).join('')+'<button class="btn" id="modaddrow">+ Add item</button>';
+  $('modlist').querySelectorAll('.modrow input').forEach(inp=>{
+    inp.addEventListener('input',e=>{modItems[+e.target.dataset.i]=e.target.value;});
+    inp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('modaddrow').click();}});
+  });
+  $('modlist').querySelectorAll('.rmrow').forEach(btn=>{
+    btn.addEventListener('click',()=>{modItems.splice(+btn.dataset.i,1);renderModList();});
+  });
+  $('modaddrow').addEventListener('click',()=>{
+    modItems.push('');renderModList();
+    const inputs=$('modlist').querySelectorAll('.modrow input');
+    if(inputs.length){inputs[inputs.length-1].focus();}
+  });
+}
+function updateModMode(){
+  $('modlist').style.display=modListMode?'block':'none';
+  $('modta').style.display=modListMode?'none':'block';
+  $('modtoggle').textContent=modListMode?'Switch to raw JSON':'Switch to list editor';
+}
 function openModal(){
   modCb=null; modName=D.name;
   $('modtitle').textContent='Edit '+D.name+' ('+D.type+')';
-  $('modta').value=fmtMultiline(D._pending!==undefined?D._pending:D.effective);
-  $('moderr').textContent=''; $('modalbg').classList.add('show');
+  const val=D._pending!==undefined?D._pending:D.effective;
+  $('modta').value=fmtMultiline(val);
+  $('moderr').textContent='';
+  modListMode=isSimpleArray(val);
+  if(modListMode){modItems=(val||[]).slice();renderModList();}
+  updateModMode();
+  $('modalbg').classList.add('show');
 }
+$('modtoggle').addEventListener('click',e=>{
+  e.preventDefault();
+  if(modListMode){
+    $('modta').value=fmtMultiline(modItems);
+  } else {
+    let v;
+    try{v=JSON.parse($('modta').value);}
+    catch(err){$('moderr').textContent='Invalid JSON: '+err.message;return;}
+    if(!isSimpleArray(v)){$('moderr').textContent='Not a simple list of strings/numbers -- fix in raw JSON first.';return;}
+    modItems=v.slice();
+    renderModList();
+  }
+  modListMode=!modListMode;
+  $('moderr').textContent='';
+  updateModMode();
+});
 $('modsave').addEventListener('click',()=>{
-  try{const v=JSON.parse($('modta').value); $('modalbg').classList.remove('show');
-    if(modCb){modCb(v);modCb=null;}
-    else {D._pending=v;
-      // re-render the value row with the new complex value, then commit
-      const code=$('sheet').querySelector('.complex code'); if(code) code.textContent=fmt(v);
-      commit();}
-  }catch(e){$('moderr').textContent='Invalid JSON: '+e.message;}
+  let v;
+  if(modListMode){
+    v=modItems.map(s=>typeof s==='string'?s.trim():s).filter(s=>s!=='');
+  } else {
+    try{v=JSON.parse($('modta').value);}
+    catch(e){$('moderr').textContent='Invalid JSON: '+e.message;return;}
+  }
+  $('modalbg').classList.remove('show');
+  if(modCb){modCb(v);modCb=null;}
+  else {D._pending=v;
+    // re-render the value row with the new complex value, then commit
+    const code=$('sheet').querySelector('.complex code'); if(code) code.textContent=fmt(v);
+    commit();}
 });
 $('modcancel').addEventListener('click',()=>{modCb=null;$('modalbg').classList.remove('show');});
 $('cfcancel').addEventListener('click',()=>$('cfbg').classList.remove('show'));
