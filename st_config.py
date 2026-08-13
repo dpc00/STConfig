@@ -278,14 +278,41 @@ def _write_user_menu(name, entries):
 # ── combined data ─────────────────────────────────────────────────────────────
 
 
-def _build_data():
-    bindings = _load_all_bindings()
-    key_count = defaultdict(int)
+def _contexts_equal(a, b):
+    return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+def _mark_conflicts(bindings):
+    # A shared key chord is only a real conflict when context doesn't
+    # disambiguate it: no context at all (resolution is load-order-dependent),
+    # or two bindings with the exact same context. A key bound once with no
+    # context and again with a context clause is deliberate layering --
+    # Default.sublime-keymap does this constantly (a context-restricted
+    # override plus a general fallback) -- and isn't ambiguous to Sublime's
+    # own resolver, so it shouldn't be flagged as one here either.
+    by_key = defaultdict(list)
     for b in bindings:
         if not b["is_sep"]:
-            key_count[b["key_str"]] += 1
-    for b in bindings:
-        b["conflict"] = (not b["is_sep"]) and key_count[b["key_str"]] > 1
+            by_key[b["key_str"]].append(b)
+        b["conflict"] = False
+    for group in by_key.values():
+        if len(group) < 2:
+            continue
+        unconditional = [b for b in group if not b["context"]]
+        if len(unconditional) > 1:
+            for b in unconditional:
+                b["conflict"] = True
+        conditional = [b for b in group if b["context"]]
+        for i, b in enumerate(conditional):
+            for other in conditional[i + 1 :]:
+                if _contexts_equal(b["context"], other["context"]):
+                    b["conflict"] = True
+                    other["conflict"] = True
+
+
+def _build_data():
+    bindings = _load_all_bindings()
+    _mark_conflicts(bindings)
     return {
         "kb": {"bindings": bindings, "user_entries": _read_user_keymap()},
         "cmds": {
