@@ -194,66 +194,101 @@ _MENU_FILES = [
 ]
 
 
-def _flatten_menu(items, breadcrumb, pkg, out, seen_headers):
-    # A .sublime-menu file can be a *partial* contribution -- Sublime's real
-    # menu loader merges same-caption (same-id, when present; these files
-    # never set one) submenu nodes across every file targeting that spot
-    # into one menu. A package that ships many small fragments all aimed at
-    # the same submenu (SublimeREPL: one Main.sublime-menu per supported
-    # language, ~36 files, each redeclaring a "SublimeREPL" header) is
-    # normal and, in a real running Sublime, shows up as one merged
-    # submenu -- not a bug in that package. Since this flattener processes
-    # files independently, without merging we'd show that header once per
-    # file. Collapse duplicate bare (no-command) headers at the same path;
-    # still recurse into every file's children so nothing under them is
-    # lost, just nested under the single header instead of N copies of it.
+def _tag_menu_source(items, pkg):
+    """Stamp every node in a freshly-loaded file's tree with which package
+    it came from, before merging -- once merged, a node's children can come
+    from several different files/packages, so this has to happen first."""
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        node = dict(item)
+        node["_pkg"] = pkg
+        if node.get("children"):
+            node["children"] = _tag_menu_source(node["children"], pkg)
+        out.append(node)
+    return out
+
+
+def _merge_menu_tree(items):
+    """Merge sibling submenu nodes the way Sublime's real menu loader does:
+    a .sublime-menu file is often a *partial* contribution, and nodes
+    targeting the same spot get merged by id (if set) or else caption, not
+    concatenated as separate entries. https://docs.sublimetext.io/guide/
+    customization/menus.html -- "Menu files with the same name are
+    concatenated, unless IDs are specified... items from different
+    .sublime-menu files reference the same item via ID, Sublime Text will
+    override the item's previous parameters."
+
+    Concretely: SublimeREPL ships one Main.sublime-menu per supported
+    language (~36 files), each redeclaring a "SublimeREPL" submenu header
+    with no id -- caption is the merge key there. In a real running
+    Sublime that's one "SublimeREPL" submenu with every language nested
+    inside; naively concatenating fragments (as an earlier version of this
+    tool did) instead showed that header 35 extra times.
+    """
+    merged = []  # list of built node dicts, in first-seen order
+    index_by_key = {}  # merge key -> index into merged
     for item in items:
         if not isinstance(item, dict):
             continue
         caption = item.get("caption", "")
         cmd = item.get("command", "")
-        children = item.get("children")
         is_sep = caption == "-"
-        current = breadcrumb + ([caption] if caption and not is_sep else [])
-        is_header = bool(children) and not cmd and not is_sep
-        header_key = (" › ".join(breadcrumb), caption) if is_header else None
-        if is_header and header_key in seen_headers:
-            pass
-        elif is_sep or caption or cmd:
-            out.append(
-                {
-                    "path": " › ".join(breadcrumb),
-                    "caption": caption,
-                    "command": cmd,
-                    "args": item.get("args"),
-                    "source": pkg,
-                    "is_user": pkg == "User",
-                    "is_sep": is_sep,
-                }
-            )
-            if is_header:
-                seen_headers.add(header_key)
-        if children and not is_sep:
-            _flatten_menu(children, current, pkg, out, seen_headers)
+        raw_children = item.get("children") or []
+        is_header = bool(raw_children) and not cmd and not is_sep
+        mid = item.get("id")
+        # Separators never merge (each is a real, distinct divider); a
+        # header merges by id when set, else by caption, matching Sublime.
+        key = None if is_sep else (("id", mid) if mid else ("cap", caption))
+
+        if key is not None and key in index_by_key and (is_header or merged[index_by_key[key]]["_raw_children"]):
+            existing = merged[index_by_key[key]]
+            existing["_raw_children"].extend(raw_children)
+            if cmd:
+                existing["command"] = cmd
+                existing["args"] = item.get("args")
+            continue
+
+        node = {
+            "caption": caption,
+            "command": cmd,
+            "args": item.get("args"),
+            "source": item.get("_pkg"),
+            "is_user": item.get("_pkg") == "User",
+            "is_sep": is_sep,
+            "_raw_children": list(raw_children),
+        }
+        if key is not None:
+            index_by_key[key] = len(merged)
+        merged.append(node)
+
+    for node in merged:
+        node["children"] = _merge_menu_tree(node.pop("_raw_children"))
+    return merged
+
+
+def _load_menu_tree(fname):
+    items = []
+    for path in sublime.find_resources(fname):
+        m = re.match(r"Packages/([^/]+)/", path)
+        pkg = m.group(1) if m else "?"
+        try:
+            tree = sublime.decode_value(sublime.load_resource(path))
+            if not isinstance(tree, list):
+                continue
+        except Exception:
+            continue
+        items.extend(_tag_menu_source(tree, pkg))
+    return _merge_menu_tree(items)
 
 
 def _load_all_menus():
     result = {}
     for fname in _MENU_FILES:
-        items = []
-        seen_headers = set()
-        for path in sublime.find_resources(fname):
-            m = re.match(r"Packages/([^/]+)/", path)
-            pkg = m.group(1) if m else "?"
-            try:
-                tree = sublime.decode_value(sublime.load_resource(path))
-                if not isinstance(tree, list):
-                    continue
-            except Exception:
-                continue
-            _flatten_menu(tree, [], pkg, items, seen_headers)
-        if items:
-            result[fname.replace(".sublime-menu", "")] = items
+        tree = _load_menu_tree(fname)
+        if tree:
+            result[fname.replace(".sublime-menu", "")] = tree
     return result
 
 
@@ -464,6 +499,20 @@ kbd{background:#fff;border:1px solid #c5c5c5;border-bottom:2px solid #a8a8a8;
 .dim{opacity:.4}
 .no-results{padding:48px 16px;text-align:center;color:var(--muted);font-size:14px}
 
+.menu-tree{padding:8px 16px;font-size:13px}
+.mt-row{display:flex;align-items:center;gap:6px;padding:3px 4px;border-radius:4px;cursor:default}
+.mt-row.has-children{cursor:pointer}
+.mt-row:hover{background:#f2f5fa}
+.mt-row.mt-user{background:var(--user-bg);border-left:3px solid var(--user-bdr);padding-left:5px}
+.mt-twisty{width:14px;flex:none;text-align:center;color:var(--muted);font-size:10px;user-select:none}
+.mt-cap{font-weight:500}
+.mt-cap.mt-header{color:var(--text)}
+.mt-cmd{font-family:"Cascadia Code",Consolas,monospace;font-size:11.5px;color:var(--muted);
+        background:#f0f2f5;padding:1px 6px;border-radius:3px}
+.mt-src{font-size:10px;color:var(--muted);background:#eee;padding:1px 6px;border-radius:8px}
+.mt-sep{border-top:1px solid var(--border);margin:4px 0 4px 20px}
+.mt-empty{color:var(--muted);font-style:italic;padding:2px 4px}
+
 footer{height:40px;background:var(--panel);border-top:1px solid var(--border);
        display:flex;align-items:center;padding:0 16px;gap:12px;flex-shrink:0}
 #status-msg{font-size:12px;color:var(--muted)}
@@ -628,22 +677,21 @@ pre.ctx-pre{font-size:12px;white-space:pre-wrap;overflow:auto;max-height:400px;
   <div class="tab-section hidden" id="tab-menus">
     <div class="filter-bar" id="menu-chips"></div>
     <div class="filter-bar">
-      <div class="chip active" data-mf="all"  onclick="menusSetScope('all')">All <span class="cnt" id="mn-cnt-all">0</span></div>
-      <div class="chip"        data-mf="user" onclick="menusSetScope('user')">User <span class="cnt" id="mn-cnt-user">0</span></div>
+      <div class="chip active" data-mf="tree" onclick="menusSetScope('tree')">Browse</div>
+      <div class="chip"        data-mf="user" onclick="menusSetScope('user')">My customizations <span class="cnt" id="mn-cnt-user">0</span></div>
     </div>
     <main>
-      <table>
+      <div id="menu-tree" class="menu-tree"></div>
+      <table id="menu-user-table" style="display:none">
         <thead><tr>
-          <th style="width:200px">Path</th>
-          <th style="width:220px">Caption</th>
-          <th style="width:200px">Command</th>
+          <th style="width:280px">Caption</th>
+          <th style="width:220px">Command</th>
           <th>Args</th>
-          <th style="width:110px">Source</th>
           <th style="width:100px"></th>
         </tr></thead>
         <tbody id="tb-menus"></tbody>
       </table>
-      <div class="no-results" id="nr-menus" style="display:none">No items in this menu. Click + Add to create one.</div>
+      <div class="no-results" id="nr-menus" style="display:none">No customizations in this menu yet. Click + Add to create one.</div>
     </main>
   </div>
 
@@ -780,7 +828,7 @@ pre.ctx-pre{font-size:12px;white-space:pre-wrap;overflow:auto;max-height:400px;
 <script>
 const D = __DATA__;
 let _tab = 'keys', _search = '';
-let _kbFilter = 'all', _cmdFilter = 'all', _menuFilter = 'all';
+let _kbFilter = 'all', _cmdFilter = 'all';
 let _editIdx = null, _editType = 'kb';
 let _delPending = null;
 
@@ -1018,6 +1066,8 @@ function cmdsApply() {
 
 const _ALL_MENUS = ['Side Bar','Tab Context','Context','Main','Find in Files','Widget Context'];
 let _currentMenu = null;
+let _menuScope = 'tree';   // 'tree' (read-only browse, default) | 'user' (your own entries, editable)
+let _menuExpanded = new Set(); // node-path keys ("0.2.1") expanded in the tree view
 
 function menusBuild() {
   closePanel();
@@ -1028,106 +1078,159 @@ function menusBuild() {
   const shown = [...new Set([..._ALL_MENUS, ...menuKeys, ...userKeys])];
   if (!_currentMenu || !shown.includes(_currentMenu)) _currentMenu = shown[0] || null;
   shown.forEach(name => {
-    // Total entries in this menu file (Default + packages + User combined) --
-    // was the User-only override count before, which read 0 for anyone who
-    // hadn't customized that file, even though e.g. Main has ~780 real items.
-    const cnt = ((D.menus || {})[name] || []).length;
     const el = document.createElement('div');
     el.className = 'chip' + (name === _currentMenu ? ' active' : '');
     el.dataset.mn = name;
     el.onclick = () => menusSetFilter(name);
-    el.innerHTML = `${esc(name)} <span class="cnt">${cnt}</span>`;
+    el.innerHTML = esc(name);
     bar.appendChild(el);
   });
-  menusRenderTable();
+  menusRenderScope();
 }
 
 function menusSetFilter(name) {
   _currentMenu = name;
+  _menuExpanded = new Set();
   document.querySelectorAll('[data-mn]').forEach(el =>
     el.classList.toggle('active', el.dataset.mn === name));
-  menusRenderTable();
+  menusRenderScope();
 }
 
 function menusSetScope(f) {
-  _menuFilter = f;
+  _menuScope = f;
   document.querySelectorAll('[data-mf]').forEach(el =>
     el.classList.toggle('active', el.dataset.mf === f));
-  menusApply();
+  document.getElementById('menu-tree').style.display        = f === 'tree' ? '' : 'none';
+  document.getElementById('menu-user-table').style.display  = f === 'user' ? '' : 'none';
+  menusRenderScope();
 }
 
-function menusRenderTable() {
+function menusRenderScope() {
   closePanel();
-  const tbody = document.getElementById('tb-menus');
-  tbody.innerHTML = '';
-  const items = (_currentMenu && (D.menus || {})[_currentMenu]) || [];
-  let ui = -1;
-  items.forEach((item, i) => {
-    if (item.is_user) ui++;
-    const tr = document.createElement('tr');
-    tr.dataset.di   = i;
-    tr.dataset.user = item.is_user ? '1' : '0';
-    tr.dataset.path = (item.path || '').toLowerCase();
-    tr.dataset.cap  = (item.caption || '').toLowerCase();
-    tr.dataset.cmd  = (item.command || '').toLowerCase();
-    tr.dataset.src  = (item.source || '').toLowerCase();
-    if (item.is_user) { tr.classList.add('user-row'); tr.dataset.ui = ui; }
+  if (_menuScope === 'tree') menusRenderTree(); else menusRenderUserList();
+}
 
-    if (item.is_sep && item.is_user) {
-      tr.classList.add('sep-row');
-      tr.innerHTML =
-        `<td colspan="5"><div class="sep-inner"><div class="sep-line"></div><span class="sep-label">separator</span><div class="sep-line"></div></div></td>` +
-        `<td class="act-cell">${_moveButtons('menu', ui)}${_delButton('menu', ui)}</td>`;
-      tbody.appendChild(tr);
+// ── Browse (read-only tree) ─────────────────────────────────────────────────
+// Looks like the real menu: collapsed by default, click a row with children
+// to expand it, indented one level per submenu depth. The flat 884-row table
+// this replaced counted every nested item at every depth as one undifferen-
+// tiated list with a text "breadcrumb" column standing in for nesting --
+// technically complete, but nothing like how anyone actually experiences a
+// menu, and unreadable at that size. This mirrors the real shape instead.
+
+function menusRenderTree() {
+  const root = document.getElementById('menu-tree');
+  root.innerHTML = '';
+  const items = (_currentMenu && (D.menus || {})[_currentMenu]) || [];
+  const q = _search;
+  if (!items.length) {
+    root.innerHTML = '<div class="mt-empty">Nothing in this menu.</div>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  const anyMatch = _mtRenderList(items, frag, 0, '', q);
+  root.appendChild(frag);
+  document.getElementById('nr-menus').style.display = (q && !anyMatch) ? '' : 'none';
+  setFooter(`${_mtCount(items)} items in ${_currentMenu||''} (click to expand)`);
+}
+
+function _mtCount(items) {
+  let n = 0;
+  for (const it of items) { if (!it.is_sep) n++; n += _mtCount(it.children || []); }
+  return n;
+}
+
+// Returns true if this node or any descendant matched the search text, so a
+// match nested three levels deep still gets its ancestors shown/expanded.
+function _mtMatches(node, q) {
+  if (!q) return true;
+  if ((node.caption||'').toLowerCase().includes(q) || (node.command||'').toLowerCase().includes(q)) return true;
+  return (node.children||[]).some(c => _mtMatches(c, q));
+}
+
+function _mtRenderList(items, container, depth, pathPrefix, q) {
+  let any = false;
+  items.forEach((node, i) => {
+    const key = pathPrefix + i;
+    if (!_mtMatches(node, q)) return;
+    any = true;
+    if (node.is_sep) {
+      const sep = document.createElement('div');
+      sep.className = 'mt-sep';
+      sep.style.marginLeft = (depth * 18) + 'px';
+      container.appendChild(sep);
       return;
     }
-    // Non-user separators (there are plenty in Default's own menus) are just
-    // visual dividers with nothing to inspect or edit -- skip, same as Keys.
-    if (item.is_sep) return;
-
-    if (item.is_user) {
-      tr.classList.add('clickable');
-      tr.onclick = e => { if (e.target.closest('button')) return; openPanel('menu', i, ui); };
+    const hasChildren = (node.children || []).length > 0;
+    const expanded = q ? true : _menuExpanded.has(key); // auto-expand while searching
+    const row = document.createElement('div');
+    row.className = 'mt-row' + (hasChildren ? ' has-children' : '') + (node.is_user ? ' mt-user' : '');
+    row.style.paddingLeft = (depth * 18) + 'px';
+    row.innerHTML =
+      `<span class="mt-twisty">${hasChildren ? (expanded ? '&#9662;' : '&#9656;') : ''}</span>` +
+      `<span class="mt-cap${hasChildren?' mt-header':''}">${esc(node.caption || '(unnamed)')}</span>` +
+      (node.command ? `<span class="mt-cmd">${esc(node.command)}</span>` : '') +
+      (node.source && node.source !== 'Default' ? `<span class="mt-src">${esc(node.source)}</span>` : '');
+    if (hasChildren) {
+      row.onclick = () => {
+        if (_menuExpanded.has(key)) _menuExpanded.delete(key); else _menuExpanded.add(key);
+        menusRenderTree();
+      };
     }
-    const act = item.is_user
-      ? _moveButtons('menu', ui) + _delButton('menu', ui)
-      : '<span class="muted-sm">&#8212;</span>';
-    tr.innerHTML =
-      `<td class="muted-sm trunc" title="${esc(item.path || '')}">${esc(item.path || '')}</td>` +
-      `<td>${esc(item.caption || '')}</td>` +
-      `<td class="mono">${esc(item.command || '')}</td>` +
-      `<td class="muted-sm trunc" title="${esc(JSON.stringify(item.args??''))}">${shortJson(item.args)}</td>` +
-      `<td class="src${item.is_user?' is-user':''}">${esc(item.source || '')}</td>` +
-      `<td class="act-cell">${act}</td>`;
+    container.appendChild(row);
+    if (hasChildren && expanded) {
+      const sub = document.createElement('div');
+      _mtRenderList(node.children, sub, depth + 1, key + '.', q);
+      container.appendChild(sub);
+    }
+  });
+  return any;
+}
+
+// ── My customizations (editable, your own entries only) ────────────────────
+// Deliberately kept as the original simple flat list rather than folded into
+// the tree above: these edits are rare, deliberate actions (add/reorder/
+// delete one of your own entries), and the tree's merged/nested structure
+// doesn't map cleanly back onto a position in your flat User menu file --
+// safer to keep this small and separate than to get that mapping wrong.
+
+function menusRenderUserList() {
+  const tbody = document.getElementById('tb-menus');
+  tbody.innerHTML = '';
+  const items = (_currentMenu && D.user_menus[_currentMenu]) || [];
+  items.forEach((item, i) => {
+    const tr = document.createElement('tr');
+    tr.dataset.di  = i;
+    tr.dataset.cap = (item.caption || '').toLowerCase();
+    tr.dataset.cmd = (item.command || '').toLowerCase();
+    const isSep = item.caption === '-';
+    if (isSep) {
+      tr.classList.add('sep-row','user-row');
+      tr.innerHTML =
+        `<td colspan="3"><div class="sep-inner"><div class="sep-line"></div><span class="sep-label">separator</span><div class="sep-line"></div></div></td>` +
+        `<td class="act-cell">${_moveButtons('menu', i)}<button class="act-btn del" data-del-type="menu" data-del-idx="${i}" onclick="doDelete(this)">&#128465;</button></td>`;
+    } else {
+      tr.classList.add('user-row','clickable');
+      tr.onclick = e => { if (e.target.closest('button')) return; openPanel('menu', i, i); };
+      tr.innerHTML =
+        `<td>${esc(item.caption || '')}</td>` +
+        `<td class="mono">${esc(item.command || '')}</td>` +
+        `<td class="muted-sm trunc" title="${esc(JSON.stringify(item.args??''))}">${shortJson(item.args)}</td>` +
+        `<td class="act-cell">${_moveButtons('menu', i)}<button class="act-btn del" data-del-type="menu" data-del-idx="${i}" onclick="doDelete(this)">&#128465;</button></td>`;
+    }
     tbody.appendChild(tr);
   });
-
-  _fixMoveBtns('#tb-menus');
-
-  const rows = tbody.querySelectorAll('tr');
-  let u = 0;
-  rows.forEach(tr => { if (tr.dataset.user==='1') u++; });
-  document.getElementById('mn-cnt-all').textContent  = rows.length;
-  document.getElementById('mn-cnt-user').textContent = u;
-  menusApply();
-}
-
-function menusApply() {
   const rows = document.querySelectorAll('#tb-menus tr');
-  let vis = 0;
-  rows.forEach(tr => {
-    const isSep = tr.classList.contains('sep-row');
-    const ok = (_menuFilter==='all' || (_menuFilter==='user' && tr.dataset.user==='1')) &&
-               (isSep || !_search ||
-                tr.dataset.path.includes(_search) || tr.dataset.cap.includes(_search) ||
-                tr.dataset.cmd.includes(_search) || tr.dataset.src.includes(_search));
-    tr.classList.toggle('hidden', !ok);
-    if (ok && !isSep) vis++;
-  });
-  document.getElementById('nr-menus').style.display = vis ? 'none' : '';
-  const total = [...rows].filter(tr => !tr.classList.contains('sep-row')).length;
-  setFooter(vis < total ? `${vis} of ${total} items in ${_currentMenu||''}` : `${total} items in ${_currentMenu||''}`);
+  if (rows.length > 0) {
+    rows[0].querySelector('.up-btn')?.setAttribute('disabled','');
+    rows[rows.length-1].querySelector('.dn-btn')?.setAttribute('disabled','');
+  }
+  document.getElementById('mn-cnt-user').textContent = items.length;
+  document.getElementById('nr-menus').style.display = items.length ? 'none' : '';
+  setFooter(`${items.length} item${items.length!==1?'s':''} in ${_currentMenu||''}`);
 }
+
+function menusApply() { menusRenderScope(); }
 
 function menuMove(i, dir) {
   api('/menu/move', {menu: _currentMenu, index: i, direction: dir})
