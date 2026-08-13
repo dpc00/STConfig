@@ -194,7 +194,19 @@ _MENU_FILES = [
 ]
 
 
-def _flatten_menu(items, breadcrumb, pkg, out):
+def _flatten_menu(items, breadcrumb, pkg, out, seen_headers):
+    # A .sublime-menu file can be a *partial* contribution -- Sublime's real
+    # menu loader merges same-caption (same-id, when present; these files
+    # never set one) submenu nodes across every file targeting that spot
+    # into one menu. A package that ships many small fragments all aimed at
+    # the same submenu (SublimeREPL: one Main.sublime-menu per supported
+    # language, ~36 files, each redeclaring a "SublimeREPL" header) is
+    # normal and, in a real running Sublime, shows up as one merged
+    # submenu -- not a bug in that package. Since this flattener processes
+    # files independently, without merging we'd show that header once per
+    # file. Collapse duplicate bare (no-command) headers at the same path;
+    # still recurse into every file's children so nothing under them is
+    # lost, just nested under the single header instead of N copies of it.
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -203,7 +215,11 @@ def _flatten_menu(items, breadcrumb, pkg, out):
         children = item.get("children")
         is_sep = caption == "-"
         current = breadcrumb + ([caption] if caption and not is_sep else [])
-        if is_sep or caption or cmd:
+        is_header = bool(children) and not cmd and not is_sep
+        header_key = (" › ".join(breadcrumb), caption) if is_header else None
+        if is_header and header_key in seen_headers:
+            pass
+        elif is_sep or caption or cmd:
             out.append(
                 {
                     "path": " › ".join(breadcrumb),
@@ -215,14 +231,17 @@ def _flatten_menu(items, breadcrumb, pkg, out):
                     "is_sep": is_sep,
                 }
             )
+            if is_header:
+                seen_headers.add(header_key)
         if children and not is_sep:
-            _flatten_menu(children, current, pkg, out)
+            _flatten_menu(children, current, pkg, out, seen_headers)
 
 
 def _load_all_menus():
     result = {}
     for fname in _MENU_FILES:
         items = []
+        seen_headers = set()
         for path in sublime.find_resources(fname):
             m = re.match(r"Packages/([^/]+)/", path)
             pkg = m.group(1) if m else "?"
@@ -232,7 +251,7 @@ def _load_all_menus():
                     continue
             except Exception:
                 continue
-            _flatten_menu(tree, [], pkg, items)
+            _flatten_menu(tree, [], pkg, items, seen_headers)
         if items:
             result[fname.replace(".sublime-menu", "")] = items
     return result
