@@ -46,7 +46,7 @@ from json5.loader import loads as _j5loads, ModelLoader as _ModelLoader  # noqa:
 import sublime
 import sublime_plugin  # noqa: E402
 
-_PORT = 57324  # was 57323; bumped to escape a zombie server left by an earlier
+_PORT = 57323  # was 57323; bumped to escape a zombie server left by an earlier
                # reload (reload_plugin doesn't kill the old server thread, and the
                # orphan held the port). Revert to 57323 after a clean ST restart.
 _SERVER = [None]
