@@ -1526,9 +1526,10 @@ function bindSheet(){
   if(wt) wt.addEventListener('change',()=>{curTarget=wt.value;});
   const rb=$('restore');
   if(rb) rb.addEventListener('click',()=>{
-    if(!confirm('Delete '+D.name+' from '+curTarget+' so the default takes effect?')) return;
-    fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:D.name,target:curTarget,scope:curScope})})
-     .then(r=>r.json()).then(r=>{if(r.ok){reloadCatalogThenSelect();}else{alert(r.error||'error');}});
+    confirmDialog('Restore default?','<div>Delete <code>'+esc(D.name)+'</code> from <code>'+esc(curTarget)+'</code> so the default takes effect?</div>',()=>{
+      fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:D.name,target:curTarget,scope:curScope})})
+       .then(r=>r.json()).then(r=>{if(r.ok){reloadCatalogThenSelect();}else{alert(r.error||'error');}});
+    });
   });
 }
 
@@ -1653,11 +1654,22 @@ $('modsave').addEventListener('click',()=>{
 });
 $('modcancel').addEventListener('click',()=>{modCb=null;$('modalbg').classList.remove('show');});
 $('cfcancel').addEventListener('click',()=>$('cfbg').classList.remove('show'));
+// Native confirm()/alert() block the page (and CDP/automation) until a human
+// physically clicks the OS dialog -- bad here since this is meant to run as
+// an ordinary browser tab. Route every yes/no confirmation through the
+// existing in-page modal instead.
+function confirmDialog(title, bodyHtml, onOk){
+  $('cftitle').textContent=title;
+  $('cfbody').innerHTML=bodyHtml;
+  $('cfbg').classList.add('show');
+  $('cfok').onclick=()=>{$('cfbg').classList.remove('show');onOk();};
+}
 
 $('search').addEventListener('input',renderTree);
 $('stopbtn').addEventListener('click',()=>{
-  if(!confirm('Stop the settings editor server?')) return;
-  fetch('/api/shutdown',{method:'POST'}).then(()=>$('sheet').innerHTML='<div class="ph">Server stopped. Close this tab.</div>');
+  confirmDialog('Stop the settings editor server?','',()=>{
+    fetch('/api/shutdown',{method:'POST'}).then(()=>$('sheet').innerHTML='<div class="ph">Server stopped. Close this tab.</div>');
+  });
 });
 
 // --- keybindings tab --------------------------------------------------------
@@ -1794,9 +1806,10 @@ function kmSave(){
 }
 function kmDelete(){
   if(!KMD.writable){alert('Read-only.');return;}
-  if(!confirm('Delete this binding from '+basename(KMD.source)+'?'))return;
-  fetch('/api/keymap/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idx:KMD.idx,expect_cmd:KMD.command})})
-   .then(r=>r.json()).then(r=>{if(r.ok){KM=r.catalog.bindings||[];kmSelIdx=null;renderKmTree();$('sheet').innerHTML='<div class="ph">Binding deleted. Select another on the left.</div>';}else{alert(r.error||'error');}});
+  confirmDialog('Delete this binding?','<div>From <code>'+esc(basename(KMD.source))+'</code>.</div>',()=>{
+    fetch('/api/keymap/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idx:KMD.idx,expect_cmd:KMD.command})})
+     .then(r=>r.json()).then(r=>{if(r.ok){KM=r.catalog.bindings||[];kmSelIdx=null;renderKmTree();$('sheet').innerHTML='<div class="ph">Binding deleted. Select another on the left.</div>';}else{alert(r.error||'error');}});
+  });
 }
 function newKm(){
   kmIsNew=true; kmSelIdx=null;
