@@ -201,10 +201,9 @@ def _flatten_menu(items, breadcrumb, pkg, out):
         caption = item.get("caption", "")
         cmd = item.get("command", "")
         children = item.get("children")
-        if caption == "-":
-            continue
-        current = breadcrumb + ([caption] if caption else [])
-        if caption or cmd:
+        is_sep = caption == "-"
+        current = breadcrumb + ([caption] if caption and not is_sep else [])
+        if is_sep or caption or cmd:
             out.append(
                 {
                     "path": " › ".join(breadcrumb),
@@ -212,9 +211,11 @@ def _flatten_menu(items, breadcrumb, pkg, out):
                     "command": cmd,
                     "args": item.get("args"),
                     "source": pkg,
+                    "is_user": pkg == "User",
+                    "is_sep": is_sep,
                 }
             )
-        if children:
+        if children and not is_sep:
             _flatten_menu(children, current, pkg, out)
 
 
@@ -607,12 +608,18 @@ pre.ctx-pre{font-size:12px;white-space:pre-wrap;overflow:auto;max-height:400px;
 
   <div class="tab-section hidden" id="tab-menus">
     <div class="filter-bar" id="menu-chips"></div>
+    <div class="filter-bar">
+      <div class="chip active" data-mf="all"  onclick="menusSetScope('all')">All <span class="cnt" id="mn-cnt-all">0</span></div>
+      <div class="chip"        data-mf="user" onclick="menusSetScope('user')">User <span class="cnt" id="mn-cnt-user">0</span></div>
+    </div>
     <main>
       <table>
         <thead><tr>
-          <th style="width:280px">Caption</th>
-          <th style="width:220px">Command</th>
+          <th style="width:200px">Path</th>
+          <th style="width:220px">Caption</th>
+          <th style="width:200px">Command</th>
           <th>Args</th>
+          <th style="width:110px">Source</th>
           <th style="width:100px"></th>
         </tr></thead>
         <tbody id="tb-menus"></tbody>
@@ -997,11 +1004,15 @@ function menusBuild() {
   closePanel();
   const bar = document.getElementById('menu-chips');
   bar.innerHTML = '';
-  const userKeys = Object.keys(D.user_menus);
-  const shown = [...new Set([...userKeys, ..._ALL_MENUS])];
+  const menuKeys = Object.keys(D.menus || {});
+  const userKeys = Object.keys(D.user_menus || {});
+  const shown = [...new Set([..._ALL_MENUS, ...menuKeys, ...userKeys])];
   if (!_currentMenu || !shown.includes(_currentMenu)) _currentMenu = shown[0] || null;
   shown.forEach(name => {
-    const cnt = (D.user_menus[name] || []).length;
+    // Total entries in this menu file (Default + packages + User combined) --
+    // was the User-only override count before, which read 0 for anyone who
+    // hadn't customized that file, even though e.g. Main has ~780 real items.
+    const cnt = ((D.menus || {})[name] || []).length;
     const el = document.createElement('div');
     el.className = 'chip' + (name === _currentMenu ? ' active' : '');
     el.dataset.mn = name;
@@ -1009,53 +1020,95 @@ function menusBuild() {
     el.innerHTML = `${esc(name)} <span class="cnt">${cnt}</span>`;
     bar.appendChild(el);
   });
-  menusRender();
+  menusRenderTable();
 }
 
 function menusSetFilter(name) {
   _currentMenu = name;
   document.querySelectorAll('[data-mn]').forEach(el =>
     el.classList.toggle('active', el.dataset.mn === name));
-  menusRender();
+  menusRenderTable();
 }
 
-function menusRender() {
+function menusSetScope(f) {
+  _menuFilter = f;
+  document.querySelectorAll('[data-mf]').forEach(el =>
+    el.classList.toggle('active', el.dataset.mf === f));
+  menusApply();
+}
+
+function menusRenderTable() {
   closePanel();
   const tbody = document.getElementById('tb-menus');
   tbody.innerHTML = '';
-  const items = (_currentMenu && D.user_menus[_currentMenu]) || [];
+  const items = (_currentMenu && (D.menus || {})[_currentMenu]) || [];
+  let ui = -1;
   items.forEach((item, i) => {
+    if (item.is_user) ui++;
     const tr = document.createElement('tr');
-    tr.dataset.di  = i;
-    tr.dataset.cap = (item.caption || '').toLowerCase();
-    tr.dataset.cmd = (item.command || '').toLowerCase();
-    const isSep = item.caption === '-';
-    if (isSep) {
-      tr.classList.add('sep-row','user-row');
+    tr.dataset.di   = i;
+    tr.dataset.user = item.is_user ? '1' : '0';
+    tr.dataset.path = (item.path || '').toLowerCase();
+    tr.dataset.cap  = (item.caption || '').toLowerCase();
+    tr.dataset.cmd  = (item.command || '').toLowerCase();
+    tr.dataset.src  = (item.source || '').toLowerCase();
+    if (item.is_user) { tr.classList.add('user-row'); tr.dataset.ui = ui; }
+
+    if (item.is_sep && item.is_user) {
+      tr.classList.add('sep-row');
       tr.innerHTML =
-        `<td colspan="3"><div class="sep-inner"><div class="sep-line"></div><span class="sep-label">separator</span><div class="sep-line"></div></div></td>` +
-        `<td class="act-cell">${_moveButtons('menu', i)}<button class="act-btn del" data-del-type="menu" data-del-idx="${i}" onclick="doDelete(this)">&#128465;</button></td>`;
-    } else {
-      tr.classList.add('user-row','clickable');
-      tr.onclick = e => { if (e.target.closest('button')) return; openPanel('menu', i, i); };
-      tr.innerHTML =
-        `<td>${esc(item.caption || '')}</td>` +
-        `<td class="mono">${esc(item.command || '')}</td>` +
-        `<td class="muted-sm trunc" title="${esc(JSON.stringify(item.args??''))}">${shortJson(item.args)}</td>` +
-        `<td class="act-cell">${_moveButtons('menu', i)}<button class="act-btn del" data-del-type="menu" data-del-idx="${i}" onclick="doDelete(this)">&#128465;</button></td>`;
+        `<td colspan="5"><div class="sep-inner"><div class="sep-line"></div><span class="sep-label">separator</span><div class="sep-line"></div></div></td>` +
+        `<td class="act-cell">${_moveButtons('menu', ui)}${_delButton('menu', ui)}</td>`;
+      tbody.appendChild(tr);
+      return;
     }
+    // Non-user separators (there are plenty in Default's own menus) are just
+    // visual dividers with nothing to inspect or edit -- skip, same as Keys.
+    if (item.is_sep) return;
+
+    if (item.is_user) {
+      tr.classList.add('clickable');
+      tr.onclick = e => { if (e.target.closest('button')) return; openPanel('menu', i, ui); };
+    }
+    const act = item.is_user
+      ? _moveButtons('menu', ui) + _delButton('menu', ui)
+      : '<span class="muted-sm">&#8212;</span>';
+    tr.innerHTML =
+      `<td class="muted-sm trunc" title="${esc(item.path || '')}">${esc(item.path || '')}</td>` +
+      `<td>${esc(item.caption || '')}</td>` +
+      `<td class="mono">${esc(item.command || '')}</td>` +
+      `<td class="muted-sm trunc" title="${esc(JSON.stringify(item.args??''))}">${shortJson(item.args)}</td>` +
+      `<td class="src${item.is_user?' is-user':''}">${esc(item.source || '')}</td>` +
+      `<td class="act-cell">${act}</td>`;
     tbody.appendChild(tr);
   });
-  const rows = document.querySelectorAll('#tb-menus tr');
-  if (rows.length > 0) {
-    rows[0].querySelector('.up-btn')?.setAttribute('disabled','');
-    rows[rows.length-1].querySelector('.dn-btn')?.setAttribute('disabled','');
-  }
-  document.getElementById('nr-menus').style.display = items.length ? 'none' : '';
-  setFooter(`${items.length} item${items.length!==1?'s':''} in ${_currentMenu||''}`);
+
+  _fixMoveBtns('#tb-menus');
+
+  const rows = tbody.querySelectorAll('tr');
+  let u = 0;
+  rows.forEach(tr => { if (tr.dataset.user==='1') u++; });
+  document.getElementById('mn-cnt-all').textContent  = rows.length;
+  document.getElementById('mn-cnt-user').textContent = u;
+  menusApply();
 }
 
-function menusApply() { menusRender(); }
+function menusApply() {
+  const rows = document.querySelectorAll('#tb-menus tr');
+  let vis = 0;
+  rows.forEach(tr => {
+    const isSep = tr.classList.contains('sep-row');
+    const ok = (_menuFilter==='all' || (_menuFilter==='user' && tr.dataset.user==='1')) &&
+               (isSep || !_search ||
+                tr.dataset.path.includes(_search) || tr.dataset.cap.includes(_search) ||
+                tr.dataset.cmd.includes(_search) || tr.dataset.src.includes(_search));
+    tr.classList.toggle('hidden', !ok);
+    if (ok && !isSep) vis++;
+  });
+  document.getElementById('nr-menus').style.display = vis ? 'none' : '';
+  const total = [...rows].filter(tr => !tr.classList.contains('sep-row')).length;
+  setFooter(vis < total ? `${vis} of ${total} items in ${_currentMenu||''}` : `${total} items in ${_currentMenu||''}`);
+}
 
 function menuMove(i, dir) {
   api('/menu/move', {menu: _currentMenu, index: i, direction: dir})
@@ -1344,7 +1397,7 @@ function openPanel(type, dataIdx, ui) {
   let data;
   if      (type === 'kb')   data = D.kb.bindings[dataIdx];
   else if (type === 'cmd')  data = D.cmds.bindings[dataIdx];
-  else                      data = (D.user_menus[_currentMenu] || [])[dataIdx];
+  else                      data = (D.user_menus[_currentMenu] || [])[ui];
   _epState = {type, dataIdx, ui};
   const isKb   = type === 'kb';
   const isMenu = type === 'menu';
